@@ -181,6 +181,108 @@ pub trait PrimeFieldRepr:
 
         Ok(())
     }
+
+    /// Writes this `PrimeFieldRepr` as a VarInt.
+    fn write_varint<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        print!("W:");
+        let mut count = false;
+        let mut digits_set = 0;
+        for digit in self.as_ref().iter().rev() {
+            // Find most significant non-zero digit
+            if !count && *digit > 0 {
+                count = true;
+            }
+            if count {
+                digits_set += 1;
+            }
+        }
+
+        // PrimeFieldRepr uses 64-bit chunks for its internal representation,
+        // while VarInt uses 7-bit chunks. We need to carry some bits between
+        // digits.
+        //
+        // Digit 1:
+        //  MSB                                 LSB
+        // | 1 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 |
+        // Digit 2:
+        // | 2 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 6 |
+        // Digit 3:
+        // | 3 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 5 |
+        // Digit 4:
+        // | 4 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 4 |
+        // Digit 5:
+        // | 5 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 3 |
+        // Digit 6:
+        // | 6 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 2 |
+        // Digit 7:
+        // | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 1 |
+
+        let mut carry = 0;
+        let mut round = 0;
+        for (i, digit) in self.as_ref().iter().enumerate() {
+            let mut n = (*digit << round) + carry;
+            carry = *digit >> (63 - round);
+
+            if i + 1 < digits_set {
+                for _ in 0..9 {
+                    print!("{},", n & 127);
+                    writer.write(&[(1 << 7) | (n & 127) as u8])?;
+                    n >>= 7;
+                }
+            } else {
+                // Last digit
+                while n > 127 {
+                    print!("{},", n & 127);
+                    writer.write(&[(1 << 7) | (n & 127) as u8])?;
+                    n >>= 7;
+                }
+                carry = n;
+                break;
+            }
+            round = (round + 1) % 7;
+        }
+        println!("{}", carry & 127);
+        writer.write(&[(carry & 127) as u8])?;
+
+        Ok(())
+    }
+
+    /// Reads a VarInt into this representation.
+    fn read_varint<R: Read>(&mut self, mut reader: R) -> io::Result<()> {
+        print!("R:");
+        // Zero out all digits (in case we don't set them all later)
+        for digit in self.as_mut().iter_mut() {
+            *digit = 0;
+        }
+
+        let mut shift = 0;
+        let mut carry = 0;
+        let mut buf = [0u8; 1];
+        for digit in self.as_mut().iter_mut() {
+            *digit = carry as u64;
+            reader.read_exact(&mut buf)?;
+            while buf[0] >> 7 == 1 {
+                print!("{},", buf[0] & 127);
+                *digit += ((buf[0] & 127) as u64) << shift;
+                shift += 7;
+                if shift >= 64 {
+                    // Used up this digit, move on to next
+                    shift = shift - 64;
+                    carry = (buf[0] & 127) >> (7 - shift);
+                    break;
+                }
+                reader.read_exact(&mut buf)?;
+            }
+            if buf[0] >> 7 == 0 {
+                // Last chunk
+                println!("{}", buf[0] & 127);
+                *digit += ((buf[0] & 127) as u64) << shift;
+                break;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq)]
